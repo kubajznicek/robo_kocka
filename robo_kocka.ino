@@ -1,19 +1,23 @@
 #include <microM.h>
 #include <Servo.h>
 #define LED_BUILTIN 13
+#define BUZZER_PIN 11
 #define SPEED_INCR 10
 #define SERVO_MAX 180
+#define SERVO_COUNT 14
 int pwm_val[14] = {0};
 int drive_velocity = 0;
-int drive_nopress_count = 0;
 #define DRIVE_NOPRESS_TOLERANCE 10 // number of loop cycles. 10ms * 10 = 100ms
-int max_drive_velocity = 100;  // can be changed by 59/97  (-,+) buttons info/exit
+#define MAX_DRIVE_VELOCITY 255
 int rotation_velocity = 0;
-#define MAX_ROTATION_VELOCITY 80
-#define TOGGLE_DEBOUNCE 100 // [ms]
+#define MAX_ROTATION_VELOCITY 200
+#define TOGGLE_DEBOUNCE 500 // [ms]
+#define SWING_SPEED 2 // [rad/s]
+float swing_pos[SERVO_COUNT] = {0};
 
-Servo servo[3];
-int swing_state[3] = {0};
+Servo servo[SERVO_COUNT];
+int swing_state[SERVO_COUNT] = {0};
+int toggle_lock[SERVO_COUNT] = {0};
 
 void setup()
 {
@@ -23,6 +27,12 @@ void setup()
     Serial.begin(19200);
     servo[2].attach(2);
     servo[2].write(0);
+    servo[3].attach(3);
+    servo[3].write(0);
+    servo[13].attach(13);
+    servo[13].write(0);
+
+    servo[2].writeMicroseconds(1500);
 }
 
 void pwmPlus(int pin)
@@ -53,24 +63,20 @@ void pwmHalf(int pin)
 
 void pwmToggle(int pin)
 {
+    if (millis() < toggle_lock[pin])
+        return;
+    toggle_lock[pin] = millis() + TOGGLE_DEBOUNCE;
     pwm_val[pin] = pwm_val[pin] < SERVO_MAX / 2 ? SERVO_MAX : 0;
     servo[pin].write(pwm_val[pin]);
-    delay(TOGGLE_DEBOUNCE);
-}
-
-// set max drive velocity with constraints
-void set_max_drive_velocity(int val)
-{
-    max_drive_velocity += val;
-    max_drive_velocity = max_drive_velocity > 255 ? 255 : max_drive_velocity;
-    max_drive_velocity = max_drive_velocity < 60 ? 60 : max_drive_velocity;
 }
 
 // toggle swing mode
 void pwmSwingToggle(int pin)
 {
+    if (millis() < toggle_lock[pin])
+        return;
+    toggle_lock[pin] = millis() + TOGGLE_DEBOUNCE;
     swing_state[pin] = !swing_state[pin];
-    delay(TOGGLE_DEBOUNCE);
 }
 
 // Calculate next swing frame for servo pin. Use sin function.
@@ -78,7 +84,11 @@ void swing(int pin)
 {
     if (swing_state[pin] == 0)
         return;
-    int val = (sin(millis() / 1000.0) + 1) * SERVO_MAX / 2;
+    swing_pos[pin]++;
+    float x = swing_pos[pin] / 100 * SWING_SPEED;
+    if (x > M_PI * 2)
+        swing_pos[pin] = 0; 
+    int val = (sin(x) + 1) * SERVO_MAX / 2;
     servo[pin].write(val);
 }
 
@@ -87,18 +97,16 @@ void drive(int dir)
 {
     if (dir == 0)
     {
-        drive_nopress_count++;
-        if (drive_nopress_count > DRIVE_NOPRESS_TOLERANCE)
-        {
-            drive_velocity = 0;
-        }
+        drive_velocity = 0;
+        rotation_velocity = 0;
     }
     else
     {
-        drive_nopress_count = 0;
         drive_velocity += dir * SPEED_INCR;
-        drive_velocity = drive_velocity > max_drive_velocity ? max_drive_velocity : drive_velocity;
-        drive_velocity = drive_velocity < -max_drive_velocity ? -max_drive_velocity : drive_velocity;    }
+        drive_velocity = drive_velocity > MAX_DRIVE_VELOCITY ? MAX_DRIVE_VELOCITY : drive_velocity;
+        drive_velocity = drive_velocity < -MAX_DRIVE_VELOCITY ? -MAX_DRIVE_VELOCITY : drive_velocity;
+    }
+    differential_drive();
 }
 
 // set rotation velocity with constraints. dir = 1 right, dir = -1 left, dir = 0 reset
@@ -110,11 +118,11 @@ void steer(int dir)
     }
     else
     {
-        rotation_velocity = dir * MAX_ROTATION_VELOCITY;
-        rotation_velocity = rotation_velocity > 255 ? 255 : rotation_velocity;
-        rotation_velocity = rotation_velocity < -255 ? -255 : rotation_velocity;
+        rotation_velocity += dir * SPEED_INCR;
+        rotation_velocity = rotation_velocity > MAX_ROTATION_VELOCITY ? MAX_ROTATION_VELOCITY : rotation_velocity;
+        rotation_velocity = rotation_velocity < -MAX_ROTATION_VELOCITY ? -MAX_ROTATION_VELOCITY : rotation_velocity;
     }
-    drive_nopress_count = 0;
+    differential_drive();
 }
 
 // Calculate differential drive for 2 motors based on global drive_velocity and rotation_velocity.
@@ -126,11 +134,27 @@ void differential_drive()
     int max_value = max(abs(left), abs(right));
     if (max_value > 255)
     {
-        left = left * 255 / max_value;
-        right = right * 255 / max_value;
+        left = (float)left * 255 / max_value;
+        right = (float)right * 255 / max_value;
     }
-    microM.motor(1, left);
-    microM.motor(2, right);
+    Serial.print(left);
+    Serial.print(',');
+    Serial.println(right);
+    microM.Motors(left, right, 0, 0);
+}
+
+void playMeowingSound() {
+  // Play the meowing sound for a duration
+  tone(BUZZER_PIN, 1000, 150); // First meow
+  delay(100);
+
+  tone(BUZZER_PIN, 1500, 200); // Second meow
+  delay(100);
+
+  tone(BUZZER_PIN, 1200, 250); // Third meow
+  delay(100);
+
+  noTone(BUZZER_PIN);
 }
 
 
@@ -138,13 +162,16 @@ void loop()
 {
     delay(10);
     swing(2);
+    swing(3);
     swing(13);
     int ircommand = microM.ircommand;
     microM.ircommand = 0;
 
+
     if (ircommand == 0)
-        drive(0);
+        // drive(0);
         return;
+    // Serial.println(ircommand);
 
     switch (ircommand)
     {
@@ -211,20 +238,15 @@ void loop()
         pwmMinus(13);
         break;
 
-    case 22:
-        pwmToggle(1);
-        break;
-    case 21:
-        pwmToggle(2);
-        break;
+
     case 60:
-        pwmToggle(3);
+        pwmSwingToggle(13);
         break;
     case 44:
         pwmToggle(11);
         break;
     case 102:
-        pwmToggle(13);
+        drive(0);
         break;
 
     case 21:
@@ -248,15 +270,14 @@ void loop()
         break;
 
     case 59:
-        set_max_drive_velocity(-50);
+        
         break;
     case 97:
-        set_max_drive_velocity(50);
+        
         break;
 
     default:
         break;
     }
 
-    Serial.println(servo[2].read());
 }
